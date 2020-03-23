@@ -1,16 +1,13 @@
-    //
-//  RichEditor.swift
 //
-//  Created by Caesar Wirth on 4/1/15.
-//  Copyright (c) 2015 Caesar Wirth. All rights reserved.
+//  RichEditorView.swift
+//
+//  Created by Anderson Gralha on 22/03/20.
+//  Copyright © 2020 Anderson Gralha. All rights reserved.
 //
 
 import UIKit
 import WebKit
-    
-/// The value we hold in order to be able to set the line height before the JS completely loads.
-private let DefaultInnerLineHeight: Int = 21
-    
+
 /// RichEditorDelegate defines callbacks for the delegate of the RichEditorView
 @objc public protocol RichEditorDelegate: class {
     /// Called when the inner height of the text being displayed changes
@@ -37,6 +34,16 @@ private let DefaultInnerLineHeight: Int = 21
     /// Called when custom actions are called by callbacks in the JS
     /// By default, this method is not used unless called by some custom JS that you add
     @objc optional func richEditor(_ editor: RichEditorView, handle action: String)
+}
+
+/// The value we hold in order to be able to set the line height before the JS completely loads.
+private let DefaultInnerLineHeight: Int = 28
+
+public class RichEditorWebView: WKWebView {
+    public var accessoryView: UIView?
+    public override var inputAccessoryView: UIView? {
+        return accessoryView
+    }
 }
 
 /// RichEditorView is a UIView that displays richly styled text, and allows it to be edited in a WYSIWYG fashion.
@@ -66,6 +73,8 @@ private let DefaultInnerLineHeight: Int = 21
         didSet { contentEditable = editingEnabled }
     }
     
+    private let tapRecognizer = UITapGestureRecognizer()
+    
     /// The content HTML of the text being displayed.
     /// Is continually updated as the text is being edited.
     open private(set) var contentHTML: String = "" {
@@ -82,7 +91,7 @@ private let DefaultInnerLineHeight: Int = 21
         }
     }
     
-    /// The line height of the editor. Defaults to 21.
+    /// The line height of the editor. Defaults to 28.
     open private(set) var lineHeight: Int = DefaultInnerLineHeight {
         didSet {
             runJS("RE.setLineHeight('\(lineHeight)px')")
@@ -136,17 +145,27 @@ private let DefaultInnerLineHeight: Int = 21
         webView.frame = bounds
         webView.navigationDelegate = self
         webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        webView.configuration.dataDetectorTypes = WKDataDetectorTypes()
+        
+        if #available(iOS 10.0, *) {
+            webView.configuration.dataDetectorTypes = WKDataDetectorTypes()
+        }
+        
         webView.scrollView.isScrollEnabled = isScrollEnabled
-        webView.scrollView.bounces = true
+        webView.scrollView.showsHorizontalScrollIndicator = false
+        webView.scrollView.bounces = false
         webView.scrollView.delegate = self
         webView.scrollView.clipsToBounds = false
         addSubview(webView)
         
         if let filePath = Bundle(for: RichEditorView.self).path(forResource: "rich_editor", ofType: "html") {
             let url = URL(fileURLWithPath: filePath, isDirectory: false)
-            webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+            let request = URLRequest(url: url)
+            webView.load(request)
         }
+        
+        tapRecognizer.addTarget(self, action: #selector(viewWasTapped))
+        tapRecognizer.delegate = self
+        addGestureRecognizer(tapRecognizer)
     }
     
     // MARK: - Rich Text Editing
@@ -202,19 +221,20 @@ private let DefaultInnerLineHeight: Int = 21
         }
     }
     
+    /// Returns selected text
+    public func getSelectedText(handler: @escaping (String?) -> Void) {
+        self.runJS("RE.selectedText()") { r in handler(r) }
+    }
+    
     /// The href of the current selection, if the current selection's parent is an anchor tag.
     /// Will be nil if there is no href, or it is an empty string.
     public func getSelectedHref(handler: @escaping (String?) -> Void) {
         hasRangeSelection(handler: { r in
             if !r {
-                handler(nil)
-                return
-            }
-            self.runJS("RE.getSelectedHref()") { r in
-                if r == "" {
-                    handler(nil)
-                } else {
-                    handler(r)
+                handler("")
+            } else {
+                self.runJS("RE.getSelectedHref()") { a in
+                    handler(a)
                 }
             }
         })
@@ -264,7 +284,6 @@ private let DefaultInnerLineHeight: Int = 21
         runJS("RE.setItalic()")
     }
     
-    // "superscript" is a keyword
     public func subscriptText() {
         runJS("RE.setSubscript()")
     }
@@ -336,9 +355,9 @@ private let DefaultInnerLineHeight: Int = 21
         runJS("RE.insertImage('\(url.escaped)', '\(alt.escaped)')")
     }
     
-    public func insertLink(_ href: String, title: String) {
+    public func insertLink(href: String, text: String, title: String = "") {
         runJS("RE.prepareInsert()")
-        runJS("RE.insertLink('\(href.escaped)', '\(title.escaped)')")
+        runJS("RE.insertLink('\(href.escaped)', '\(text.escaped)', '\(title.escaped)')")
     }
     
     public func focus() {
@@ -353,39 +372,54 @@ private let DefaultInnerLineHeight: Int = 21
         runJS("RE.blurFocus()")
     }
     
+    public func setCheckbox() {
+        runJS("RE.setCheckbox('\(UUID().uuidString.prefix(8))')")
+    }
+    
+    // MARK: Table functionalities
+    public func insertTable(width: Int = 2, height: Int = 2) {
+        runJS("RE.prepareInsert()")
+        runJS("RE.insertTable(\(width), \(height))")
+    }
+    
+    /// Checks if cursor is in a table element. If so, return true so that you can add menu items accordingly.
+    public func isCursorInTable() {
+        runJS("RE.isCursorInTable") { r in
+            return r
+        }
+    }
+    
+    public func addRowToTable() { runJS("RE.addRowToTable()") }
+    public func deleteRowFromTable() { runJS("RE.deleteRowFromTable()") }
+    public func deleteColumnFromTable() { runJS("RE.addRowToTable()") }
+    
+    
     /// Runs some JavaScript on the WKWebView and returns the result
     /// If there is no result, returns an empty string
     /// - parameter js: The JavaScript string to be run
     /// - returns: The result of the JavaScript that was run
     public func runJS(_ js: String, handler: ((String) -> Void)? = nil) {
-        webView.evaluateJavaScript(js) { (result, error) in
+        webView.evaluateJavaScript(js) {(result, error) in
             if let error = error {
                 print("WKWebViewJavascriptBridge Error: \(String(describing: error)) - JS: \(js)")
                 handler?("")
                 return
             }
             
-            guard let handler = handler else {
-                return
-            }
-            
-            if let resultInt = result as? Int {
-                handler("\(resultInt)")
-                return
-            }
-            
+            guard let handler = handler else { return }
             if let resultBool = result as? Bool {
                 handler(resultBool ? "true" : "false")
                 return
             }
-            
+            if let resultInt = result as? Int {
+                handler("\(resultInt)")
+                return
+            }
             if let resultStr = result as? String {
                 handler(resultStr)
                 return
             }
-            
-            // no result
-            handler("")
+            handler("") // no result
         }
     }
     
@@ -402,9 +436,7 @@ private let DefaultInnerLineHeight: Int = 21
     
     // MARK: WKWebViewDelegate
     
-    public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        // empy
-    }
+    public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {}
     
     public func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         // Handle pre-defined editor actions
@@ -414,7 +446,6 @@ private let DefaultInnerLineHeight: Int = 21
             // It comes in as a JSON array of commands that we need to parse
             runJS("RE.getCommandQueue()") { commands in
                 if let data = commands.data(using: .utf8) {
-                    
                     let jsonCommands: [String]
                     do {
                         jsonCommands = try JSONSerialization.jsonObject(with: data) as? [String] ?? []
@@ -422,7 +453,6 @@ private let DefaultInnerLineHeight: Int = 21
                         jsonCommands = []
                         NSLog("RichEditorView: Failed to parse JSON Commands")
                     }
-                    
                     jsonCommands.forEach(self.performCommand)
                 }
             }
@@ -437,7 +467,6 @@ private let DefaultInnerLineHeight: Int = 21
                 }
             }
         }
-        
         return decisionHandler(WKNavigationActionPolicy.allow);
     }
     
@@ -537,7 +566,6 @@ private let DefaultInnerLineHeight: Int = 21
                 contentEditable = editingEnabledVar
                 placeholder = placeholderText
                 lineHeight = DefaultInnerLineHeight
-                
                 delegate?.richEditorDidLoad?(self)
             }
             updateHeight()
@@ -574,7 +602,14 @@ private let DefaultInnerLineHeight: Int = 21
     }
     
     // MARK: - Responder Handling
-    
+    /// Called by the UITapGestureRecognizer when the user taps the view
+    /// If we are not already the first responder, focus the editor
+    @objc private func viewWasTapped() {
+        if !webView.isFirstResponder {
+            let point = tapRecognizer.location(in: webView)
+            focus(at: point)
+        }
+    }
     override open func becomeFirstResponder() -> Bool {
         if !webView.isFirstResponder {
             focus()
@@ -588,5 +623,4 @@ private let DefaultInnerLineHeight: Int = 21
         blur()
         return true
     }
-    
 }
