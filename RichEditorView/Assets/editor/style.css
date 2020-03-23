@@ -66,8 +66,8 @@ div {
     overflow: auto;
     display: block;
     font-family: 'Open Sans', sans-serif;
-/*    color:#666666;*/
-/*    font-size: 12pt;*/
+    color:#666666;
+    font-size: 12pt;
 }
 
 input[type=checkbox] {
